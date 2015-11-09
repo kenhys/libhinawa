@@ -172,14 +172,14 @@ void hinawa_fw_req_write(HinawaFwReq *self, HinawaFwUnit *unit, guint64 addr,
  * @self: A #HinawaFwReq
  * @unit: A #HinawaFwUnit
  * @addr: A destination address of target device
- * @frame: (element-type guint32) (array) (out caller-allocates): a 32bit array
- * @len: the bytes to read
+ * @frame: (element-type guint32) (array length=quads) (out caller-allocates): a 32bit array
+ * @quads: the number of quadlets to read
  * @exception: A #GError
  *
  * Execute read transaction to the given unit.
  */
 void hinawa_fw_req_read(HinawaFwReq *self, HinawaFwUnit *unit, guint64 addr,
-			GArray *frame, guint len, GError **exception)
+			GArray *frame, guint quads, GError **exception)
 {
 	int err;
 
@@ -189,7 +189,7 @@ void hinawa_fw_req_read(HinawaFwReq *self, HinawaFwUnit *unit, guint64 addr,
 		err = EINVAL;
 	} else {
 		g_object_ref(unit);
-		g_array_set_size(frame, len);
+		g_array_set_size(frame, quads);
 		fw_req_transact(self, unit,
 				FW_REQ_TYPE_READ, addr, frame, &err);
 		g_object_unref(unit);
