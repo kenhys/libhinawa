@@ -302,16 +302,16 @@ const guint32 *hinawa_fw_unit_get_config_rom(HinawaFwUnit *self, guint *quads)
 }
 
 /* Internal use only. */
-void hinawa_fw_unit_ioctl(HinawaFwUnit *self, int req, void *args, int *err)
+void hinawa_fw_unit_ioctl(HinawaFwUnit *self, int req, void *args,
+			  GError **exception)
 {
 	HinawaFwUnitPrivate *priv;
 
 	g_return_if_fail(HINAWA_IS_FW_UNIT(self));
 	priv = hinawa_fw_unit_get_instance_private(self);
 
-	*err = 0;
 	if (ioctl(priv->fd, req, args) < 0)
-		*err = errno;
+		raise(exception, errno);
 }
 
 static void handle_update(HinawaFwUnit *self,

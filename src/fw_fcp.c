@@ -48,8 +48,10 @@ enum avc_status {
 };
 
 struct fcp_transaction {
-	GArray *req_frame;	/* Request frame */
-	GArray *resp_frame;	/* Response frame */
+	guint32 req_frame[FCP_MAXIMUM_FRAME_BYTES];	/* Request frame */
+	guint req_len;
+	guint32 resp_frame[FCP_MAXIMUM_FRAME_BYTES];	/* Response frame */
+	guint resp_len;
 	GCond cond;
 };
 
@@ -86,29 +88,31 @@ static void hinawa_fw_fcp_init(HinawaFwFcp *self)
 /**
  * hinawa_fw_fcp_transact:
  * @self: A #HinawaFwFcp
- * @req_frame:  (element-type guint8) (array) (in): a byte frame for request
- * @resp_frame: (element-type guint8) (array) (out caller-allocates): a byte
- *		frame for response
+ * @req_frame: (element-type guint8) (array length=req_len) (in): a byte frame for request
+ * @req_len: (in): the number of bytes in the request frame
+ * @resp_frame: (element-type guint8) (array length=resp_len) (out caller-allocates): a byte frame for response
+ * @resp_len: (in): the number of bytes in the request frame
  * @exception: A #GError
  */
 void hinawa_fw_fcp_transact(HinawaFwFcp *self,
-			    GArray *req_frame, GArray *resp_frame,
+			    guint8 req_frame[], guint req_len,
+			    guint8 resp_frame[], guint resp_len,
 			    GError **exception)
 {
 	HinawaFwFcpPrivate *priv;
 	HinawaFwReq *req;
-	struct fcp_transaction trans = {0};
+	struct fcp_transaction trans;
 	GMutex local_lock;
 	gint64 expiration;
-	guint32 *buf;
-	guint i, quads, bytes;
+	guint32 *frame;
+	guint i;
 
 	g_return_if_fail(HINAWA_IS_FW_FCP(self));
 	priv = hinawa_fw_fcp_get_instance_private(self);
 
-	if (req_frame  == NULL || g_array_get_element_size(req_frame)  != 1 ||
-	    resp_frame == NULL || g_array_get_element_size(resp_frame) != 1 ||
-	    req_frame->len > FCP_MAXIMUM_FRAME_BYTES) {
+	if (req_frame  == NULL || resp_frame == NULL ||
+	    req_len > FCP_MAXIMUM_FRAME_BYTES ||
+	    resp_len > FCP_MAXIMUM_FRAME_BYTES) {
 		raise(exception, EINVAL);
 		return;
 	}
@@ -116,18 +120,9 @@ void hinawa_fw_fcp_transact(HinawaFwFcp *self,
 	req = g_object_new(HINAWA_TYPE_FW_REQ, NULL);
 
 	/* Copy guint8 array to guint32 array. */
-	quads = (req_frame->len + sizeof(guint32) - 1) / sizeof(guint32);
-	trans.req_frame = g_array_sized_new(FALSE, TRUE,
-					    sizeof(guint32), quads);
-	g_array_set_size(trans.req_frame, quads);
-	memcpy(trans.req_frame->data, req_frame->data, req_frame->len);
-	buf = (guint32 *)trans.req_frame->data;
-	for (i = 0; i < trans.req_frame->len; i++)
-		buf[i] = htobe32(buf[i]);
-
-	/* Prepare response buffer. */
-	trans.resp_frame = g_array_sized_new(FALSE, TRUE,
-					     sizeof(guint32), quads);
+	frame = (guint32 *)req_frame;
+	for (i = 0; i < req_len / 4; i++)
+		trans.req_frame[i] = GUINT32_TO_BE(frame[i]);
 
 	/* Insert this entry. */
 	g_mutex_lock(&priv->lock);
@@ -141,7 +136,7 @@ void hinawa_fw_fcp_transact(HinawaFwFcp *self,
 
 	/* Send this request frame. */
 	hinawa_fw_req_write(req, priv->unit, FCP_REQUEST_ADDR, trans.req_frame,
-			    exception);
+			    trans.req_len, exception);
 	if (*exception != NULL)
 		goto end;
 deferred:
@@ -159,19 +154,17 @@ deferred:
 		goto end;
 
 	/* It's a deffered transaction, wait 200 milli-seconds again. */
-	if (trans.resp_frame->data[0] >> 24 == AVC_STATUS_INTERIM) {
+	if (GUINT32_FROM_BE(trans.resp_frame[0]) >> 24 == AVC_STATUS_INTERIM) {
 		expiration = g_get_monotonic_time() +
 			     200 * G_TIME_SPAN_MILLISECOND;
 		goto deferred;
 	}
 
 	/* Convert guint32 array to guint8 array. */
-	buf = (guint32 *)trans.resp_frame->data;
-	for (i = 0; i < trans.resp_frame->len; i++)
-		buf[i] = htobe32(buf[i]);
-	bytes = trans.resp_frame->len * sizeof(guint32);
-	g_array_set_size(resp_frame, bytes);
-	memcpy(resp_frame->data, trans.resp_frame->data, bytes);
+	/* TODO: check length */
+	frame = (guint32 *)resp_frame;
+	for (i = 0; i < trans.resp_len / 4; i++)
+		frame[i] = GUINT32_FROM_BE(trans.resp_frame[i]);
 end:
 	/* Remove this entry. */
 	g_mutex_lock(&priv->lock);
@@ -179,13 +172,13 @@ end:
 			g_list_remove(priv->transactions, (gpointer *)&trans);
 	g_mutex_unlock(&priv->lock);
 
-	g_array_free(trans.req_frame, TRUE);
 	g_mutex_clear(&local_lock);
 	g_clear_object(&req);
 }
 
 static GArray *handle_response(HinawaFwResp *self, gint tcode,
-			       GArray *req_frame, gpointer user_data)
+			       guint32 *resp_frame, guint resp_len,
+			       gpointer user_data)
 {
 	HinawaFwFcp *fcp = (HinawaFwFcp *)user_data;
 	HinawaFwFcpPrivate *priv = hinawa_fw_fcp_get_instance_private(fcp);
@@ -198,8 +191,8 @@ static GArray *handle_response(HinawaFwResp *self, gint tcode,
 	for (entry = priv->transactions; entry != NULL; entry = entry->next) {
 		trans = (struct fcp_transaction *)entry->data;
 
-		if ((trans->req_frame->data[1] == req_frame->data[1]) &&
-		    (trans->req_frame->data[2] == req_frame->data[2]))
+		if (trans->req_frame[1] == resp_frame[1] &&
+		    trans->req_frame[2] == resp_frame[2])
 			break;
 	}
 
@@ -207,8 +200,7 @@ static GArray *handle_response(HinawaFwResp *self, gint tcode,
 	if (entry == NULL)
 		goto end;
 
-	g_array_insert_vals(trans->resp_frame, 0,
-			    req_frame->data, req_frame->len);
+	memcpy(trans->resp_frame, resp_frame, resp_len);
 	g_cond_signal(&trans->cond);
 end:
 	g_mutex_unlock(&priv->lock);

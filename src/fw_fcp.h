@@ -49,7 +49,8 @@ GType hinawa_fw_fcp_get_type(void) G_GNUC_CONST;
 void hinawa_fw_fcp_listen(HinawaFwFcp *self, HinawaFwUnit *unit,
 			  GError **exception);
 void hinawa_fw_fcp_transact(HinawaFwFcp *self,
-			    GArray *req_frame, GArray *resp_frame,
+			    guint8 req_frame[], guint req_len,
+			    guint8 resp_frame[], guint resp_len,
 			    GError **exception);
 void hinawa_fw_fcp_unlisten(HinawaFwFcp *self);
 

@@ -32,7 +32,7 @@ struct _HinawaFwRespPrivate {
 	guint width;
 	guint64 addr_handle;
 
-	GArray *req_frame;
+	guint32 *req_frame;
 };
 G_DEFINE_TYPE_WITH_PRIVATE(HinawaFwResp, hinawa_fw_resp, G_TYPE_OBJECT)
 
@@ -64,8 +64,8 @@ static void hinawa_fw_resp_class_init(HinawaFwRespClass *klass)
 	 * HinawaFwResp::requested:
 	 * @self: A #HinawaFwResp
 	 * @tcode: Transaction code
-	 * @req_frame: (element-type guint32) (array) (transfer none):
-	 *		The frame in request
+	 * @req_frame: (element-type guint32) (array length=req_len) (transfer none): The frame in request
+	 * @req_len: the number of elements in the array
 	 *
 	 * When any units transfer requests to the range of address to which
 	 * this object listening. The ::requested signal handler can set
@@ -80,8 +80,9 @@ static void hinawa_fw_resp_class_init(HinawaFwRespClass *klass)
 			     G_SIGNAL_RUN_LAST,
 			     0,
 			     NULL, NULL,
-			     hinawa_sigs_marshal_BOXED__INT_BOXED,
-			     G_TYPE_ARRAY, 2, G_TYPE_INT, G_TYPE_ARRAY);
+			     hinawa_sigs_marshal_BOXED__INT_BOXED_UINT,
+			     G_TYPE_ARRAY,
+			     3, G_TYPE_INT, G_TYPE_ARRAY, G_TYPE_UINT);
 }
 
 static void hinawa_fw_resp_init(HinawaFwResp *self)
@@ -104,7 +105,6 @@ void hinawa_fw_resp_register(HinawaFwResp *self, HinawaFwUnit *unit,
 {
 	HinawaFwRespPrivate *priv;
 	struct fw_cdev_allocate allocate = {0};
-	int err;
 
 	g_return_if_fail(HINAWA_IS_FW_RESP(self));
 	priv = hinawa_fw_resp_get_instance_private(self);
@@ -120,9 +120,9 @@ void hinawa_fw_resp_register(HinawaFwResp *self, HinawaFwUnit *unit,
 	allocate.length = width;
 	allocate.region_end = addr + width;
 
-	hinawa_fw_unit_ioctl(priv->unit, FW_CDEV_IOC_ALLOCATE, &allocate, &err);
-	if (err != 0) {
-		raise(exception, err);
+	hinawa_fw_unit_ioctl(priv->unit, FW_CDEV_IOC_ALLOCATE, &allocate,
+			     exception);
+	if (*exception != NULL) {
 		g_object_unref(priv->unit);
 		priv->unit = NULL;
 		return;
@@ -135,7 +135,7 @@ void hinawa_fw_resp_register(HinawaFwResp *self, HinawaFwUnit *unit,
 		return;
 	}
 
-	priv->req_frame  = g_array_new(FALSE, TRUE, sizeof(guint32));
+	priv->req_frame = g_malloc0(sizeof(guint32) * width);
 	if (priv->req_frame == NULL) {
 		raise(exception, ENOMEM);
 		hinawa_fw_resp_unregister(self);
@@ -155,7 +155,6 @@ void hinawa_fw_resp_unregister(HinawaFwResp *self)
 {
 	HinawaFwRespPrivate *priv;
 	struct fw_cdev_deallocate deallocate = {0};
-	int err;
 
 	g_return_if_fail(HINAWA_IS_FW_RESP(self));
 	priv = hinawa_fw_resp_get_instance_private(self);
@@ -165,12 +164,12 @@ void hinawa_fw_resp_unregister(HinawaFwResp *self)
 
 	deallocate.handle = priv->addr_handle;
 	hinawa_fw_unit_ioctl(priv->unit, FW_CDEV_IOC_DEALLOCATE, &deallocate,
-			     &err);
+			     NULL);
 	g_object_unref(priv->unit);
 	priv->unit = NULL;
 
 	if (priv->req_frame != NULL)
-		g_array_free(priv->req_frame, TRUE);
+		g_free(priv->req_frame);
 	priv->req_frame = NULL;
 }
 
@@ -180,10 +179,9 @@ void hinawa_fw_resp_handle_request(HinawaFwResp *self,
 {
 	HinawaFwRespPrivate *priv;
 	struct fw_cdev_send_response resp = {0};
-	guint i, quads;
-	guint32 *buf;
-	GArray *resp_frame;
-	int err;
+	guint32 *frame;
+	guint32 *resp_frame;
+	unsigned int i;
 
 	g_return_if_fail(HINAWA_IS_FW_RESP(self));
 	priv = hinawa_fw_resp_get_instance_private(self);
@@ -194,33 +192,31 @@ void hinawa_fw_resp_handle_request(HinawaFwResp *self,
 	}
 
 	/* Store requested frame. */
-	quads = event->length / 4;
-	g_array_set_size(priv->req_frame, quads);
-	memcpy(priv->req_frame->data, event->data, event->length);
-
-	/* For endiannness. */
-	buf = (guint32 *)priv->req_frame->data;
-	for (i = 0; i < quads; i++)
-		buf[i] = be32toh(buf[i]);
+	frame = (guint32 *)event->data;
+	for (i = 0; i < event->length / 4; i++)
+		priv->req_frame[i] = GUINT32_FROM_BE(frame[i]);
 
 	/* Emit signal to handlers. */
 	g_signal_emit(self, fw_resp_sigs[FW_RESP_SIG_TYPE_REQ], 0,
-		      event->tcode, priv->req_frame, &resp_frame);
+		      event->tcode, priv->req_frame, event->length / 4,
+		      &resp_frame);
 
+	/* TODO: the length? */
 	resp.rcode = RCODE_COMPLETE;
-	if (resp_frame == NULL || resp_frame->len == 0)
+	if (resp_frame == NULL || event->length == 0)
 		goto respond;
 
 	/* For endianness. */
-	buf = (guint32 *)resp_frame->data;
-	for (i = 0; i < resp_frame->len; i++)
-		buf[i] = htobe32(buf[i]);
+	/* TODO: the length? */
+	for (i = 0; i < event->length / 4; i++)
+		resp_frame[i] = GUINT32_TO_BE(resp_frame[i]);
 
-	resp.length = resp_frame->len;
-	resp.data = (guint64)resp_frame->data;
+	/* TODO: the length? */
+	resp.length = event->length;
+	resp.data = (guint64)resp_frame;
 respond:
 	resp.handle = event->handle;
 
 	hinawa_fw_unit_ioctl(priv->unit, FW_CDEV_IOC_SEND_RESPONSE, &resp,
-			     &err);
+			     NULL);
 }

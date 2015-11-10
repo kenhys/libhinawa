@@ -99,7 +99,8 @@ void hinawa_snd_dice_open(HinawaSndDice *self, gchar *path, GError **exception)
  * hinawa_snd_dice_transact:
  * @self: A #HinawaSndDice
  * @addr: A destination address of target device
- * @frame: (element-type guint32) (array) (in): a 32bit array
+ * @frame: (element-type guint32) (array length=len) (in): a 32bit array
+ * @len: (in): the number of elements in the array
  * @bit_flag: bit flag to wait
  * @exception: A #GError
  *
@@ -107,7 +108,7 @@ void hinawa_snd_dice_open(HinawaSndDice *self, gchar *path, GError **exception)
  * notification.
  */
 void hinawa_snd_dice_transact(HinawaSndDice *self, guint64 addr,
-			      GArray *frame, guint32 bit_flag,
+			      guint32 frame[], guint len, guint32 bit_flag,
 			      GError **exception)
 {
 	HinawaSndDicePrivate *priv;
@@ -126,7 +127,7 @@ void hinawa_snd_dice_transact(HinawaSndDice *self, guint64 addr,
 	g_cond_init(&waiter.cond);
 
 	waiter.bit_flag = bit_flag;
-	hinawa_snd_unit_write_transact(&self->parent_instance, addr, frame,
+	hinawa_snd_unit_write_transact(&self->parent_instance, addr, frame, len,
 				       exception);
 	if (*exception != NULL)
 		goto end;
